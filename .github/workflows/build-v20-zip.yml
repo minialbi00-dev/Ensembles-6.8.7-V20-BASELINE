@@ -1,6 +1,7 @@
 name: Build V20 baseline ZIP
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - chatgpt/archive-v20-zip
@@ -12,7 +13,7 @@ permissions:
 
 jobs:
   build-zip:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 20
     steps:
       - name: Checkout archive volumes
