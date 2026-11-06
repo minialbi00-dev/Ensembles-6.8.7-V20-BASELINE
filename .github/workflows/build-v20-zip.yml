@@ -1,0 +1,62 @@
+name: Build V20 baseline ZIP
+
+on:
+  push:
+    branches:
+      - chatgpt/archive-v20-zip
+    paths:
+      - ".github/workflows/build-v20-zip.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-zip:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout archive volumes
+        uses: actions/checkout@v4
+        with:
+          ref: chatgpt/archive-v20-zip
+
+      - name: Install archive tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full zip unzip
+
+      - name: Extract multipart RAR
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="Ensembles-6.8.7-V20 BASELINE.part1.rar"
+          test -s "$archive"
+          test -s "Ensembles-6.8.7-V20 BASELINE.part2.rar"
+          test -s "Ensembles-6.8.7-V20 BASELINE.part3.rar"
+          mkdir -p "$RUNNER_TEMP/v20-extracted"
+          7z x "$archive" "-o$RUNNER_TEMP/v20-extracted" -y
+          count="$(find "$RUNNER_TEMP/v20-extracted" -type f | wc -l)"
+          if [ "$count" -eq 0 ]; then
+            echo "No extracted files found."
+            exit 1
+          fi
+          echo "Extracted $count files."
+          du -sh "$RUNNER_TEMP/v20-extracted"
+
+      - name: Package extracted baseline as ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/v20-extracted"
+          zip -qr "$GITHUB_WORKSPACE/Ensembles-6.8.7-V20-BASELINE.zip" .
+          unzip -t "$GITHUB_WORKSPACE/Ensembles-6.8.7-V20-BASELINE.zip" | tail -n 2
+          ls -lh "$GITHUB_WORKSPACE/Ensembles-6.8.7-V20-BASELINE.zip"
+
+      - name: Upload ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ensembles-6.8.7-V20-BASELINE-ZIP
+          path: Ensembles-6.8.7-V20-BASELINE.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
