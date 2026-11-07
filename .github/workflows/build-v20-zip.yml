@@ -44,6 +44,16 @@ jobs:
           echo "Extracted $count files."
           du -sh "$RUNNER_TEMP/v20-extracted"
 
+      - name: Restore FluidSynth for external SF2
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_root="$RUNNER_TEMP/v20-extracted/Ensembles-6.8.7-V20 BASELINE"
+          test -d "$source_root"
+          patch --directory="$source_root" --strip=1 --input="$GITHUB_WORKSPACE/patches/restore-fluidsynth-external-sf2.patch"
+          python3 "$source_root/tests/external_sf2_fluidsynth_routing_source_test.py"
+          python3 "$source_root/tests/native_style_renderer_routing_source_test.py"
+
       - name: Package extracted baseline as ZIP
         shell: bash
         run: |
