@@ -1,0 +1,235 @@
+--- a/src/main_qt.cpp
++++ b/src/main_qt.cpp
+@@ -3105,7 +3105,7 @@
+             if (route == QStringLiteral("lggm")) {
+                 const QString bank = discoverLgGmSoundFont();
+                 QString error;
+-                if (bank.isEmpty() || !loadSoundFont(bank, false, &error)) {
++                if (bank.isEmpty() || !loadSoundFont(bank, false, &error, true)) {
+                     const QString detail = bank.isEmpty()
+                         ? QStringLiteral("LS-GM.sf2 tidak ditemukan di data/lg_gm/LS-GM.sf2.") : error;
+                     setStatus(QStringLiteral("LG-GM Native gagal diaktifkan: %1").arg(detail));
+@@ -5164,6 +5164,11 @@
+ 
+     void applyAudioOutputSettings() {
+         if (!audioSettingsReady_) return;
++        // The explicit LG-GM route is reserved for the bundled/native Yamaha
++        // style renderer. External SoundFonts always use FluidSynth, even if
++        // the last selected output route used to be "lggm".
++        const bool useLgGmNative = audioRoutingCombo_ &&
++            audioRoutingCombo_->currentData().toString() == QStringLiteral("lggm");
+         if (soundFontPath_.isEmpty()) {
+             persistAudioOutputSettings();
+             if (audioOutputStatusLabel_) audioOutputStatusLabel_->setText(QStringLiteral("Pilihan audio disimpan. Pilih SoundFont SF2 yang valid untuk membuka stream RtAudio."));
+@@ -5171,7 +5176,7 @@
+         }
+         if (!audioEngine_ || !audioEngine_->isReady()) {
+             QString error;
+-            if (loadSoundFont(soundFontPath_, false, &error)) {
++            if (loadSoundFont(soundFontPath_, false, &error, useLgGmNative)) {
+                 persistAudioOutputSettings();
+             } else {
+                 persistAudioOutputSettings();
+@@ -5185,7 +5190,7 @@
+         const unsigned int oldRate = audioEngine_->sampleRate();
+         const unsigned int oldFrames = audioEngine_->bufferFrames();
+         QString error;
+-        if (!loadSoundFont(soundFontPath_, false, &error)) {
++        if (!loadSoundFont(soundFontPath_, false, &error, useLgGmNative)) {
+             audioSettingsReady_ = false;
+             const int apiIndex = audioApiCombo_->findData(static_cast<int>(oldApi));
+             audioApiCombo_->setCurrentIndex(apiIndex >= 0 ? apiIndex : 0);
+@@ -5484,7 +5489,8 @@
+         updateOutputStatus();
+     }
+ 
+-    bool loadSoundFont(const QString &path, bool persist, QString *errorOut = nullptr) {
++    bool loadSoundFont(const QString &path, bool persist, QString *errorOut = nullptr,
++                       bool useLgGmNative = false) {
+         if (!isValidSoundFontFile(path)) {
+             const QString message = QStringLiteral("File bukan SoundFont SF2 RIFF/SFBK yang valid. Pilih file SF2 lengkap, bukan pointer Git LFS.");
+             if (errorOut) *errorOut = message;
+@@ -5494,8 +5500,9 @@
+         auto candidate = std::make_unique<ensembles::AudioEngine>();
+         std::string error;
+         const QByteArray encodedPath = QDir::toNativeSeparators(path).toUtf8();
+-        const bool useLgGmRoute = audioRoutingCombo_ && audioRoutingCombo_->currentData().toString() == QStringLiteral("lggm");
+-        if (!candidate->initialize(useLgGmRoute ? "" : encodedPath.constData(), &error, selectedRtAudioApi(),
++        // Renderer choice is explicit: an ordinary/external SF2 is loaded by
++        // FluidSynth; only the dedicated LS-GM route opts into the native sampler.
++        if (!candidate->initialize(useLgGmNative ? "" : encodedPath.constData(), &error, selectedRtAudioApi(),
+                                    selectedRtAudioDeviceId(), selectedRtAudioSampleRate(),
+                                    selectedRtAudioBufferFrames())) {
+             const QString message = QString::fromUtf8(error.data(), static_cast<qsizetype>(error.size()));
+@@ -5503,7 +5510,7 @@
+             if (soundFontStatusLabel_) soundFontStatusLabel_->setText(QStringLiteral("SoundFont tidak bisa diaktifkan: %1").arg(message));
+             return false;
+         }
+-        if (useLgGmRoute) {
++        if (useLgGmNative) {
+             if (!candidate->loadLgGmNativeSoundFont(encodedPath.constData(), &error)) {
+                 const QString message = QString::fromUtf8(error.data(), static_cast<qsizetype>(error.size()));
+                 if (errorOut) *errorOut = message;
+@@ -5512,7 +5519,7 @@
+             }
+         }
+         QString vst2Failure;
+-        if (!useLgGmRoute && !vst2PluginPath_.isEmpty()) {
++        if (!useLgGmNative && !vst2PluginPath_.isEmpty()) {
+             const QByteArray vst2Path = QDir::toNativeSeparators(vst2PluginPath_).toUtf8();
+             if (!candidate->loadVst2Plugin(vst2Path.constData(), &error))
+                 vst2Failure = QString::fromUtf8(error.data(), static_cast<qsizetype>(error.size()));
+@@ -5696,16 +5703,50 @@
+     }
+ 
+     void chooseSoundFont() {
++        // Yamaha Style and Roland STL own an exclusive format-specific renderer.
++        // Do not replace it underneath a running style with an external SF2.
++        if (isYamahaStyleExtension(activeStyleExtension_) ||
++            activeStyleExtension_ == QStringLiteral("stl")) {
++            QMessageBox::information(this, QStringLiteral("Renderer style sedang aktif"),
++                QStringLiteral("Tutup atau keluarkan style Yamaha/ Roland yang sedang aktif sebelum memilih SF2 eksternal. Style tersebut menggunakan renderer native khusus.") );
++            return;
++        }
++
+         const QString start = soundFontPath_.isEmpty()
+             ? QStandardPaths::writableLocation(QStandardPaths::MusicLocation) : QFileInfo(soundFontPath_).absolutePath();
+         const QString path = QFileDialog::getOpenFileName(this, QStringLiteral("Pilih SoundFont untuk FluidSynth"), start,
+             QStringLiteral("SoundFont 2 (*.sf2);;All files (*.*)"));
+         if (path.isEmpty()) return;
++
++        // Manually selected SF2 means FluidSynth is the renderer. Keep the
++        // deliberate dual-output route, but replace automatic, WinMM-only, or
++        // LG-GM routing so the selected SF2 is actually rendered internally.
++        const QString previousRoute = audioRoutingCombo_
++            ? audioRoutingCombo_->currentData().toString() : QStringLiteral("auto");
++        const QString selectedRoute = previousRoute == QStringLiteral("both")
++            ? QStringLiteral("both") : QStringLiteral("fluid");
++        if (audioRoutingCombo_) {
++            const QSignalBlocker blocker(audioRoutingCombo_);
++            const int index = audioRoutingCombo_->findData(selectedRoute);
++            if (index >= 0) audioRoutingCombo_->setCurrentIndex(index);
++        }
++        synchronizeOutputRoutes();
++
+         QString error;
+-        if (!loadSoundFont(path, true, &error)) {
++        if (!loadSoundFont(path, true, &error, false)) {
++            if (audioRoutingCombo_) {
++                const QSignalBlocker blocker(audioRoutingCombo_);
++                const int previousIndex = audioRoutingCombo_->findData(previousRoute);
++                if (previousIndex >= 0) audioRoutingCombo_->setCurrentIndex(previousIndex);
++            }
++            synchronizeOutputRoutes();
+             QMessageBox::warning(this, QStringLiteral("SoundFont gagal dimuat"), error);
+             return;
+         }
++
++        QSettings settings;
++        settings.setValue(QStringLiteral("audio/outputRouting"), selectedRoute);
++        settings.sync();
+         savePanelSettings();
+     }
+ 
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -424,6 +424,8 @@
+       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/yamaha_style_picker_source_test.py")
+     add_test(NAME native-style-renderer-routing-source-guard
+       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/native_style_renderer_routing_source_test.py")
++    add_test(NAME external-sf2-fluidsynth-routing-source-guard
++      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/external_sf2_fluidsynth_routing_source_test.py")
+     add_test(NAME style-stop-midi-queue-source-invariants
+       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/style_stop_midi_queue_source_test.py")
+     add_test(NAME genos2-immediate-button-and-autofill-source-guard
+--- /dev/null
++++ b/tests/external_sf2_fluidsynth_routing_source_test.py
+@@ -0,0 +1,71 @@
++#!/usr/bin/env python3
++"""Source-level guards for external SF2 -> FluidSynth routing."""
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++MAIN = (ROOT / "src/main_qt.cpp").read_text(encoding="utf-8")
++
++
++def function_body(source: str, signature: str) -> str:
++    start = source.find(signature)
++    if start < 0:
++        raise AssertionError(f"function signature not found: {signature}")
++    opening = source.find("{", start)
++    depth = 0
++    for index in range(opening, len(source)):
++        if source[index] == "{":
++            depth += 1
++        elif source[index] == "}":
++            depth -= 1
++            if depth == 0:
++                return source[opening + 1:index]
++    raise AssertionError(f"unterminated function: {signature}")
++
++
++loader = function_body(
++    MAIN,
++    "bool loadSoundFont(const QString &path, bool persist, QString *errorOut = nullptr,",
++)
++chooser = function_body(MAIN, "void chooseSoundFont()")
++settings = function_body(MAIN, "void applyAudioOutputSettings()")
++
++checks = {
++    "SF2 loader defaults to FluidSynth instead of inferring renderer from route": (
++        "bool useLgGmNative = false" in MAIN
++        and 'currentData().toString() == QStringLiteral("lggm")' not in loader
++        and "candidate->initialize(useLgGmNative ? \"\" : encodedPath.constData()" in loader
++    ),
++    "LG-GM native renderer is an explicit opt-in only": (
++        "if (useLgGmNative)" in loader
++        and "candidate->loadLgGmNativeSoundFont(encodedPath.constData(), &error)" in loader
++        and "if (!useLgGmNative && !vst2PluginPath_.isEmpty())" in loader
++    ),
++    "manual external SF2 selection switches to FluidSynth route": (
++        'previousRoute == QStringLiteral("both")' in chooser
++        and 'QStringLiteral("fluid")' in chooser
++        and "loadSoundFont(path, true, &error, false)" in chooser
++        and 'settings.setValue(QStringLiteral("audio/outputRouting"), selectedRoute)' in chooser
++    ),
++    "dedicated Yamaha/Roland style renderer cannot be replaced underneath a running style": (
++        "isYamahaStyleExtension(activeStyleExtension_)" in chooser
++        and 'activeStyleExtension_ == QStringLiteral("stl")' in chooser
++    ),
++    "selecting LG-GM in the output route still explicitly loads native LS-GM": (
++        'route == QStringLiteral("lggm")' in MAIN
++        and "loadSoundFont(bank, false, &error, true)" in MAIN
++    ),
++    "audio-device changes preserve the explicitly selected LG-GM renderer": (
++        'currentData().toString() == QStringLiteral("lggm")' in settings
++        and "loadSoundFont(soundFontPath_, false, &error, useLgGmNative)" in settings
++    ),
++    "Yamaha style activation continues to use the native LS-GM sampler": (
++        "audioEngine_->loadLgGmNativeSoundFont(bankPath.constData(), &rendererError)" in MAIN
++    ),
++}
++
++failed = [name for name, passed in checks.items() if not passed]
++for name, passed in checks.items():
++    print(("PASS" if passed else "FAIL") + " " + name)
++if failed:
++    raise SystemExit(f"{len(failed)} external SF2 routing source checks failed")
++print(f"All {len(checks)} external SF2 routing source checks passed.")
+--- /dev/null
++++ b/docs/EXTERNAL-SF2-FLUIDSYNTH-RESTORE.md
+@@ -0,0 +1,14 @@
++# External SF2 renderer routing
++
++Manually choosing an external `.sf2` now loads that bank into **FluidSynth + RtAudio**. The renderer is no longer inferred from the current output-routing dropdown, so a previously selected `lggm` route cannot silently redirect an external bank into the internal LS-GM sampler. Manual SF2 selection sets the output route to `fluid`; an explicitly selected `both` route remains `both`.
++
++The native renderer remains available for its intended, dedicated paths:
++
++- Yamaha Style-family playback continues to activate the native LS-GM SF2 sampler.
++- Selecting the explicit `LG-GM Native C++ (LS-GM.sf2)` output route still loads LS-GM through the native sampler.
++- Roland `.STL` playback continues to use Native SCVA.
++- Changing RtAudio device/sample-rate/buffer settings preserves the explicitly selected LG-GM route.
++
++A Yamaha Style-family or Roland `.STL` renderer is exclusive while that style is active. The SF2 chooser therefore asks the user to unload that style before replacing its dedicated renderer.
++
++Regression guard: `tests/external_sf2_fluidsynth_routing_source_test.py`.
